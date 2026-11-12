@@ -1,0 +1,99 @@
+rules:
+  - category: SQLI
+    title: SQL error exposed
+    pattern: '(SQL syntax.*MySQL|sqlite3?\.OperationalError|PostgreSQL.*ERROR|ORA-\d{5}|Unclosed quotation mark after the character string)'
+    applies_to: [html, text, source]
+    severity: medium
+    confidence: 0.7
+    recommendation: Check query parameter handling and use parameterized SQL.
+  - category: SQLI
+    title: SQL query built with string concatenation
+    pattern: '(execute\s*\(\s*[fF]["\x27]|SELECT\s+.+\s+FROM\s+.+\s*\+|raw\s*\(\s*[fF]["\x27])'
+    applies_to: [source]
+    severity: medium
+    confidence: 0.5
+  - category: XSS
+    title: Potential DOM XSS sink
+    pattern: '(innerHTML\s*=|outerHTML\s*=|document\.write\s*\(|insertAdjacentHTML\s*\()'
+    applies_to: [js, html, source]
+    severity: low
+    confidence: 0.4
+    recommendation: Trace untrusted data into the sink and prefer safe DOM APIs.
+  - category: XSS
+    title: Potential unsafe eval
+    pattern: '\beval\s*\('
+    applies_to: [js, html, source]
+    severity: low
+    confidence: 0.35
+  - category: IDOR
+    title: Object identifier parameter
+    pattern: '(?:[?&]|["\x27])(?:user_?id|account_?id|document_?id|order_?id|profile_?id)\s*(?:=|:)\s*["\x27]?\d+'
+    applies_to: [url, html, js, source, text]
+    severity: info
+    confidence: 0.25
+    recommendation: Compare access with two authorized test accounts.
+  - category: COOKIE_AUTH
+    title: Client-side privilege indicator
+    pattern: '(?:admin|isAdmin|role|is_staff)\s*(?:=|:)\s*["\x27]?(?:true|false|admin|user)'
+    applies_to: [html, js, source, headers, text]
+    severity: low
+    confidence: 0.35
+    recommendation: Verify server-side role checks; cookie value alone is not proof.
+  - category: BROKEN_ACCESS_CONTROL
+    title: Privileged route reference
+    pattern: '(?:/admin(?:/|\b)|/internal(?:/|\b)|/manage(?:/|\b))'
+    applies_to: [html, js, source, url, text]
+    severity: info
+    confidence: 0.2
+    recommendation: Check authorization using approved test roles.
+  - category: SSRF
+    title: User-controlled URL candidate
+    pattern: '(?:[?&]|["\x27])(?:url|callback|webhook|fetch_url|image_url|target_url)\s*(?:=|:)'
+    applies_to: [html, js, source, url, text]
+    severity: info
+    confidence: 0.25
+    recommendation: Review outbound request handling and allowlist destinations.
+  - category: COMMAND_INJECTION
+    title: Shell execution primitive
+    pattern: '(os\.system\s*\(|subprocess\.(?:Popen|run|call)\s*\(|shell\s*=\s*True|exec\s*\()'
+    applies_to: [source]
+    severity: medium
+    confidence: 0.45
+    recommendation: Check whether user input reaches shell execution.
+  - category: XXE
+    title: XML DTD or external entity usage
+    pattern: '(<!ENTITY|resolve_entities\s*=\s*True|load_dtd\s*=\s*True)'
+    applies_to: [text, source, html]
+    severity: low
+    confidence: 0.4
+    recommendation: Disable external entities in XML parsers.
+  - category: SSTI
+    title: Template render from a string
+    pattern: '(render_template_string\s*\(|Template\s*\(\s*(?:request|user|input)|from_string\s*\()'
+    applies_to: [source]
+    severity: medium
+    confidence: 0.45
+    recommendation: Check whether user-controlled input becomes template source.
+  - category: FILE_UPLOAD
+    title: File upload input
+    pattern: '(type\s*=\s*["\x27]file["\x27]|multipart/form-data|request\.files|UploadFile\s*\()'
+    applies_to: [html, source, text]
+    severity: info
+    confidence: 0.3
+    recommendation: Review file type, size, storage and execution controls.
+  - category: FLAG
+    title: CTF flag format found
+    pattern: '\b(?:flag|CTF|HTB|picoCTF)\{[^}\r\n]{1,160}\}'
+    applies_to: [html, js, source, text]
+    severity: info
+    confidence: 0.9
+    redact: true
+    recommendation: Flag-like token found in supplied content. Inspect source locally.
+  - category: SECRET
+    title: Potential hardcoded secret
+    pattern: '(?:api[_-]?key|secret[_-]?key|password)\s*[:=]\s*["\x27][A-Za-z0-9_\-]{12,}["\x27]'
+    applies_to: [source, js, text]
+    severity: medium
+    confidence: 0.6
+    redact: true
+    recommendation: Rotate exposed secrets; avoid publishing them.

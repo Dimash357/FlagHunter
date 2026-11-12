@@ -1,0 +1,8 @@
+max_pages: 25
+max_depth: 2
+max_file_bytes: 1048576
+max_total_bytes: 10485760
+timeout_seconds: 8
+request_delay_seconds: 0.25
+user_agent: FlagHunter-CTF-Lab/1.0
+ai_confidence_threshold: 0.55
