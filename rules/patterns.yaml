@@ -1,99 +1,199 @@
+# FlagHunter pattern signatures.
+#
+# Each rule: category, title, regex `pattern`, `applies_to` content kinds,
+# severity, confidence, optional `recommendation`, optional `redact` (replace
+# the matched evidence so a real secret/flag is never stored), optional `tags`.
+#
+# Content kinds: html, text, js, json, xml, source, headers, url.
+# Signatures are tuned toward *remote response* evidence (error strings, stack
+# traces, reflected markers) because CTF targets are black boxes, not source.
+# Confidence is kept modest unless the signal is specific, to limit false
+# positives; structural + active detectors raise it when there is real evidence.
+
 rules:
+  # ---------------------------------------------------------------- SQL Injection
   - category: SQLI
-    title: SQL error exposed
-    pattern: '(SQL syntax.*MySQL|sqlite3?\.OperationalError|PostgreSQL.*ERROR|ORA-\d{5}|Unclosed quotation mark after the character string)'
-    applies_to: [html, text, source]
-    severity: medium
-    confidence: 0.7
-    recommendation: Check query parameter handling and use parameterized SQL.
+    title: Database error message exposed
+    pattern: '(You have an error in your SQL syntax|supplied argument is not a valid MySQL|mysql_fetch_(?:array|assoc)|MySqlException|Unclosed quotation mark after the character string|Microsoft OLE DB Provider for SQL Server|Incorrect syntax near|ORA-\d{5}|quoted string not properly terminated|PostgreSQL query failed|pg_query\(\)|PG::SyntaxError|SQLSTATE\[|SQLiteException|sqlite3\.OperationalError|near "[^"]*": syntax error|SQL syntax.*MariaDB|Warning:\s+(?:mysqli?|pg|oci|sqlsrv)_)'
+    applies_to: [html, text, json, xml]
+    severity: high
+    confidence: 0.75
+    recommendation: A database error leaked to the response strongly suggests injectable input. Verify with a single quote and parameterised-query testing.
+    tags: [error-based]
   - category: SQLI
-    title: SQL query built with string concatenation
-    pattern: '(execute\s*\(\s*[fF]["\x27]|SELECT\s+.+\s+FROM\s+.+\s*\+|raw\s*\(\s*[fF]["\x27])'
+    title: Query built with string concatenation (source)
+    pattern: '(execute\s*\(\s*[fF]["\x27]|cursor\.execute\s*\([^,)]*[+%]|SELECT\s+.+\s+FROM\s+.+["\x27]\s*\+|["\x27]\s*\+\s*\$_(?:GET|POST|REQUEST)|query\s*=\s*["\x27].*\+)'
     applies_to: [source]
     severity: medium
     confidence: 0.5
+    recommendation: Check whether user input reaches the query unparameterised.
+
+  # ------------------------------------------------------------ Cross-Site Scripting
   - category: XSS
-    title: Potential DOM XSS sink
-    pattern: '(innerHTML\s*=|outerHTML\s*=|document\.write\s*\(|insertAdjacentHTML\s*\()'
+    title: DOM XSS sink
+    pattern: '(\.innerHTML\s*=|\.outerHTML\s*=|document\.write(?:ln)?\s*\(|\.insertAdjacentHTML\s*\(|\$\([^)]*\)\.html\s*\(|dangerouslySetInnerHTML|\.setHTML\s*\()'
     applies_to: [js, html, source]
-    severity: low
+    severity: medium
     confidence: 0.4
-    recommendation: Trace untrusted data into the sink and prefer safe DOM APIs.
+    recommendation: Trace whether untrusted input reaches this sink; prefer textContent / safe DOM APIs.
+    tags: [dom]
   - category: XSS
-    title: Potential unsafe eval
-    pattern: '\beval\s*\('
+    title: Dynamic code execution sink
+    pattern: '(\beval\s*\(|new\s+Function\s*\(|setTimeout\s*\(\s*["\x27]|setInterval\s*\(\s*["\x27])'
     applies_to: [js, html, source]
     severity: low
-    confidence: 0.35
+    confidence: 0.3
+
+  # ----------------------------------------------------------------------- IDOR
   - category: IDOR
-    title: Object identifier parameter
-    pattern: '(?:[?&]|["\x27])(?:user_?id|account_?id|document_?id|order_?id|profile_?id)\s*(?:=|:)\s*["\x27]?\d+'
-    applies_to: [url, html, js, source, text]
-    severity: info
-    confidence: 0.25
-    recommendation: Compare access with two authorized test accounts.
+    title: Numeric object identifier in parameter
+    pattern: '(?:[?&])(id|uid|user_?id|account_?id|document_?id|doc_?id|order_?id|invoice_?id|file_?id|profile_?id|record_?id|num|no)=\d+'
+    applies_to: [url, html, js, text]
+    severity: medium
+    confidence: 0.3
+    recommendation: Compare access to this id across two authorised test accounts.
+
+  # ------------------------------------------------------ Cookie Auth / Session
   - category: COOKIE_AUTH
-    title: Client-side privilege indicator
-    pattern: '(?:admin|isAdmin|role|is_staff)\s*(?:=|:)\s*["\x27]?(?:true|false|admin|user)'
-    applies_to: [html, js, source, headers, text]
+    title: Client-side privilege flag
+    pattern: '(?:\b|["\x27])(is_?admin|isAdmin|admin|role|is_?staff|user_?type|access_?level|privilege|auth(?:enticated)?)["\x27]?\s*(?:=|:)\s*["\x27]?(?:true|1|admin|root|superuser|staff|user)\b'
+    applies_to: [html, js, headers, text, json]
+    severity: medium
+    confidence: 0.4
+    recommendation: A privilege value exposed client-side is not proof; test whether the server re-checks it.
+  - category: COOKIE_AUTH
+    title: JWT token present
+    pattern: '\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{0,}'
+    applies_to: [html, js, headers, text, json]
     severity: low
     confidence: 0.35
-    recommendation: Verify server-side role checks; cookie value alone is not proof.
+    redact: true
+    recommendation: Inspect the JWT header/payload; test alg=none and weak-secret signing with jwt_tool.
+
+  # ------------------------------------------------------- Broken Access Control
   - category: BROKEN_ACCESS_CONTROL
     title: Privileged route reference
-    pattern: '(?:/admin(?:/|\b)|/internal(?:/|\b)|/manage(?:/|\b))'
-    applies_to: [html, js, source, url, text]
-    severity: info
-    confidence: 0.2
-    recommendation: Check authorization using approved test roles.
-  - category: SSRF
-    title: User-controlled URL candidate
-    pattern: '(?:[?&]|["\x27])(?:url|callback|webhook|fetch_url|image_url|target_url)\s*(?:=|:)'
-    applies_to: [html, js, source, url, text]
-    severity: info
+    pattern: '(?:href|src|action|url|["\x27]|[?&])\s*[=:]?\s*["\x27]?(/(?:admin|administrator|internal|manage(?:ment)?|dashboard|console|config|setup|backend|staff|moderator|superuser)(?:/|["\x27 ?]|$))'
+    applies_to: [html, js, url, text]
+    severity: low
     confidence: 0.25
-    recommendation: Review outbound request handling and allowlist destinations.
+    recommendation: Check authorization on this route using approved low-priv and anonymous roles.
+
+  # ----------------------------------------------------------------------- SSRF
+  - category: SSRF
+    title: User-controlled URL parameter
+    pattern: '(?:[?&])(url|uri|link|next|redirect|redir|return(?:_?url|to)?|dest(?:ination)?|callback|webhook|image_?url|img_?url|fetch(?:_?url)?|feed|host|domain|site|proxy|load|open|continue|page_?url|out|go|target_?url)=[^&#]*'
+    applies_to: [url, html, js, text]
+    severity: medium
+    confidence: 0.3
+    recommendation: Review outbound request handling; allow-list destinations and block internal ranges.
+
+  # ---------------------------------------------------------- Command Injection
   - category: COMMAND_INJECTION
-    title: Shell execution primitive
-    pattern: '(os\.system\s*\(|subprocess\.(?:Popen|run|call)\s*\(|shell\s*=\s*True|exec\s*\()'
-    applies_to: [source]
+    title: Shell execution primitive (source)
+    pattern: '(os\.system\s*\(|subprocess\.(?:Popen|run|call|check_output)\s*\([^)]*shell\s*=\s*True|\bshell_exec\s*\(|\bpassthru\s*\(|\bpopen\s*\(|\bproc_open\s*\(|Runtime\.getRuntime\(\)\.exec|child_process|\bexecSync\s*\()'
+    applies_to: [source, js]
+    severity: high
+    confidence: 0.45
+    recommendation: Check whether user input reaches the shell; use argument arrays, never shell=True with input.
+  - category: COMMAND_INJECTION
+    title: Command output reflected (id/uname)
+    pattern: '(uid=\d+\([a-z_][a-z0-9_-]*\)\s+gid=\d+|Linux\s+\S+\s+\d+\.\d+\.\d+\S*\s+#\d+)'
+    applies_to: [html, text, json]
+    severity: critical
+    confidence: 0.85
+    recommendation: Output of id/uname in a response is strong evidence of command execution. Confirm and report.
+
+  # ------------------------------------------------------------------------ XXE
+  - category: XXE
+    title: XML DOCTYPE / external entity
+    pattern: '(<!DOCTYPE[^>]+(?:SYSTEM|PUBLIC)|<!ENTITY\s+\S+\s+SYSTEM|resolve_entities\s*=\s*True|load_dtd\s*=\s*True|noent\s*=\s*True|XMLConstants\.ACCESS_EXTERNAL)'
+    applies_to: [text, source, html, xml]
     severity: medium
     confidence: 0.45
-    recommendation: Check whether user input reaches shell execution.
+    recommendation: Disable DTDs / external entities in the XML parser.
   - category: XXE
-    title: XML DTD or external entity usage
-    pattern: '(<!ENTITY|resolve_entities\s*=\s*True|load_dtd\s*=\s*True)'
-    applies_to: [text, source, html]
-    severity: low
-    confidence: 0.4
-    recommendation: Disable external entities in XML parsers.
+    title: System file contents reflected
+    pattern: '(root:.*:0:0:|daemon:.*:/usr/sbin|\[boot loader\]|; for 16-bit app support)'
+    applies_to: [html, text, xml, json]
+    severity: critical
+    confidence: 0.8
+    redact: true
+    recommendation: A system file leaked in the response indicates file disclosure (XXE/LFI). Confirm and report.
+
+  # ------------------------------------------------------------------------ SSTI
   - category: SSTI
-    title: Template render from a string
-    pattern: '(render_template_string\s*\(|Template\s*\(\s*(?:request|user|input)|from_string\s*\()'
+    title: Template render from a string (source)
+    pattern: '(render_template_string\s*\(|Template\s*\(\s*(?:request|user|input|params)|from_string\s*\(|\.render\s*\(\s*(?:request|user|input)|new\s+Template\s*\()'
     applies_to: [source]
-    severity: medium
+    severity: high
     confidence: 0.45
     recommendation: Check whether user-controlled input becomes template source.
+  - category: SSTI
+    title: Template engine error / traceback
+    pattern: '(jinja2\.exceptions\.|TemplateSyntaxError|TemplateNotFound|freemarker\.core|org\.apache\.velocity|Twig\\\\Error|smarty_internal|UndefinedError:|TemplateAssertionError)'
+    applies_to: [html, text, json]
+    severity: medium
+    confidence: 0.5
+    recommendation: A template-engine error exposes the engine; test SSTI with an arithmetic marker.
+
+  # ------------------------------------------------------------- Unrestricted Upload
   - category: FILE_UPLOAD
-    title: File upload input
-    pattern: '(type\s*=\s*["\x27]file["\x27]|multipart/form-data|request\.files|UploadFile\s*\()'
+    title: File upload surface
+    pattern: '(type\s*=\s*["\x27]file["\x27]|multipart/form-data|request\.files|UploadFile|\$_FILES|move_uploaded_file\s*\()'
     applies_to: [html, source, text]
-    severity: info
+    severity: low
     confidence: 0.3
-    recommendation: Review file type, size, storage and execution controls.
+    recommendation: Review file type/size/storage/execution controls (allow-list, rename, no exec dir).
+
+  # ----------------------------------------------------- Info: stack traces / banners
+  - category: INFO
+    title: Debug stack trace or framework error
+    pattern: '(Traceback \(most recent call last\)|Werkzeug Debugger|You.re seeing this error because you have DEBUG\s*=\s*True|Whitmann|ActionView::Template::Error|Server Error in .\/. Application|<b>(?:Fatal error|Warning|Notice)</b>:|\.java:\d+\)\s*$|stack trace:)'
+    applies_to: [html, text, json]
+    severity: low
+    confidence: 0.5
+    recommendation: Verbose errors disclose internals and often reveal the exact injectable sink. Note the engine/paths shown.
+  - category: INFO
+    title: Directory listing
+    pattern: '<title>Index of /'
+    applies_to: [html]
+    severity: low
+    confidence: 0.6
+    recommendation: Directory listing is enabled; browse for backups, source, or flag files.
+
+  # ----------------------------------------------------------------- CTF flag hints
   - category: FLAG
-    title: CTF flag format found
-    pattern: '\b(?:flag|CTF|HTB|picoCTF)\{[^}\r\n]{1,160}\}'
-    applies_to: [html, js, source, text]
-    severity: info
+    title: CTF flag token
+    pattern: '\b(?:flag|ctf|htb|thm|pico(?:CTF)?|actf|pwn|key|secret)\{[^}\r\n]{1,160}\}'
+    applies_to: [html, js, source, text, json, xml]
+    severity: high
     confidence: 0.9
     redact: true
-    recommendation: Flag-like token found in supplied content. Inspect source locally.
+    recommendation: A flag-format token appears in the fetched content. Inspect the source locally; do not post it anywhere.
+
+  # --------------------------------------------------------------------- Secrets
   - category: SECRET
-    title: Potential hardcoded secret
-    pattern: '(?:api[_-]?key|secret[_-]?key|password)\s*[:=]\s*["\x27][A-Za-z0-9_\-]{12,}["\x27]'
-    applies_to: [source, js, text]
-    severity: medium
-    confidence: 0.6
+    title: Hardcoded secret / API key
+    pattern: '(?:api[_-]?key|secret[_-]?key|access[_-]?token|client[_-]?secret|password|passwd|pwd)["\x27]?\s*[:=]\s*["\x27][A-Za-z0-9_\-\.\/+]{12,}["\x27]'
+    applies_to: [source, js, text, json]
+    severity: high
+    confidence: 0.55
     redact: true
-    recommendation: Rotate exposed secrets; avoid publishing them.
+    recommendation: Rotate any genuinely exposed secret; never commit or publish it.
+  - category: SECRET
+    title: AWS access key id
+    pattern: '\bAKIA[0-9A-Z]{16}\b'
+    applies_to: [source, js, text, json, html]
+    severity: high
+    confidence: 0.75
+    redact: true
+    recommendation: Treat as a leaked AWS key; rotate immediately.
+  - category: SECRET
+    title: Private key block
+    pattern: '-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----'
+    applies_to: [source, text, html, json]
+    severity: high
+    confidence: 0.8
+    redact: true
+    recommendation: A private key is exposed; rotate it.
